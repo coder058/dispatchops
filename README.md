@@ -4,6 +4,8 @@ What happens to a delivery plan when an urgent request arrives, a vehicle drops 
 
 DispatchOps is an interactive, fictional shift built from the kind of queue, capacity and exception decisions I encountered in logistics work. You assign deliveries, respond to incidents and decide whether to accept a recommendation or choose an operator yourself. The final screen walks back through the decisions you made.
 
+[Play the shift](https://dispatchops-xi.vercel.app/)
+
 The recommendation engine is a small, inspectable ruleset—not an LLM and not a route optimiser. It checks required skills, capacity, region and current load, then waits for human approval before changing the shift.
 
 ## What I practised
