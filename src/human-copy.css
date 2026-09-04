@@ -1,0 +1,10 @@
+/* SOURCE: simplified project presentation after removing decorative status labels. */
+.briefing-nav {
+  grid-template-columns: 1fr auto;
+  font-size: 10px;
+  letter-spacing: .05em;
+}
+
+.briefing-rules h2 {
+  margin-top: 22px;
+}
