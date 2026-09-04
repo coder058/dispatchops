@@ -1,0 +1,8 @@
+{
+  "framework": "vite",
+  "buildCommand": "npm run typecheck && vite build",
+  "outputDirectory": "dist/client",
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}
