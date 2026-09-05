@@ -29,6 +29,8 @@ export interface GameJob {
   completeAt: number | null;
   travelMinutes: number;
   late: boolean;
+  originZone: Zone | null;
+  beginsAt: number | null;
 }
 
 export interface GameEvent {
@@ -79,7 +81,7 @@ export interface GameResult {
   forcedReassignments: number;
 }
 
-const SHIFT_START = 9 * 60; // SOURCE: scenario briefing defines a 09:00 synthetic shift start.
+export const SHIFT_START = 9 * 60; // SOURCE: scenario briefing defines a 09:00 synthetic shift start.
 export const SHIFT_END = 11 * 60 + 15; // GUESS: a 135-minute scenario keeps a recruiter playthrough short; tune with playtesting.
 export const TICK_MINUTES = 15; // GUESS: 15-minute turns balance readable consequences with a short demo.
 export const TICK_INTERVAL_MS = 22000; // GUESS: 22 seconds per synthetic 15-minute turn (9 turns ≈ 3.3 minutes total) gives recruiters enough time to read, match skills, and respond to incidents without rushing.
@@ -117,7 +119,7 @@ const scenarioEvents: GameEvent[] = [
 ]; // SOURCE: deterministic fictional incidents; they make every replay comparable.
 
 function createJob(id: string, reference: string, title: string, zone: Zone, skill: Skill | null, priority: GameJob["priority"], dueOffset: number, releasedOffset = 0): GameJob {
-  return { id, reference, title, zone, skill, priority, dueAt: SHIFT_START + dueOffset, releasedAt: SHIFT_START + releasedOffset, status: "waiting", driverId: null, completeAt: null, travelMinutes: 0, late: false };
+  return { id, reference, title, zone, skill, priority, dueAt: SHIFT_START + dueOffset, releasedAt: SHIFT_START + releasedOffset, status: "waiting", driverId: null, completeAt: null, travelMinutes: 0, late: false, originZone: null, beginsAt: null };
 }
 
 export function createInitialGame(): GameState {
@@ -158,21 +160,34 @@ export function canAssign(state: GameState, job: GameJob, driver: GameDriver): {
   return { allowed: true, reason: "Eligible" };
 }
 
+export function previewAssignment(state: GameState, job: GameJob, driver: GameDriver) {
+  const queued = state.jobs.filter((item) => item.status === "assigned" && item.driverId === driver.id)
+    .sort((a, b) => (a.completeAt ?? state.time) - (b.completeAt ?? state.time));
+  const last = queued.at(-1);
+  const originZone = last?.zone ?? driver.zone;
+  const beginsAt = Math.max(state.time, last?.completeAt ?? state.time);
+  // SOURCE: the West incident adds one scenario turn while the restriction is active.
+  const delay = job.zone === "West" && state.triggeredEventIds.includes("E3") ? TICK_MINUTES : 0;
+  const travelMinutes = travelMatrix[originZone][job.zone] + delay;
+  return { originZone, beginsAt, travelMinutes, completeAt: beginsAt + travelMinutes + SERVICE_MINUTES };
+}
+
 export function proposeAssignment(state: GameState, jobId: string): AgentProposal | null {
   const job = state.jobs.find((item) => item.id === jobId);
   if (!job || job.status !== "waiting") return null;
   const candidates = state.drivers
     .filter((driver) => canAssign(state, job, driver).allowed)
-    .map((driver) => ({ driver, travel: travelMatrix[driver.zone][job.zone] }))
-    .sort((a, b) => a.travel - b.travel || a.driver.assigned - b.driver.assigned || a.driver.id.localeCompare(b.driver.id));
+    .map((driver) => ({ driver, plan: previewAssignment(state, job, driver) }))
+    .sort((a, b) => a.plan.completeAt - b.plan.completeAt || a.driver.assigned - b.driver.assigned || a.driver.id.localeCompare(b.driver.id));
   const selected = candidates[0];
   if (!selected) return null;
   const reasons = [
     job.skill ? `Certified for ${job.skill}` : "No specialist handling required",
-    `${selected.travel} synthetic travel minutes from ${selected.driver.zone}`,
+    `${selected.plan.travelMinutes} synthetic travel minutes from ${selected.plan.originZone}`,
+    `Arrival ${formatTime(selected.plan.completeAt)}${selected.plan.completeAt > job.dueAt ? " — past target" : " — within target"}`,
     `${selected.driver.capacity - selected.driver.assigned} capacity slot${selected.driver.capacity - selected.driver.assigned === 1 ? "" : "s"} remaining`,
   ];
-  return { jobId, driverId: selected.driver.id, reasons, travelMinutes: selected.travel };
+  return { jobId, driverId: selected.driver.id, reasons, travelMinutes: selected.plan.travelMinutes };
 }
 
 export function assignJob(state: GameState, jobId: string, driverId: string, source: "agent" | "manual"): GameState {
@@ -183,17 +198,15 @@ export function assignJob(state: GameState, jobId: string, driverId: string, sou
   if (!eligibility.allowed) {
     return { ...state, invalidAttempts: state.invalidAttempts + 1, log: [...state.log, { at: state.time, kind: "decision", text: `${job.reference} was not assigned: ${eligibility.reason}` }] };
   }
-  const travelMinutes = travelMatrix[driver.zone][job.zone];
-  const beginsAt = Math.max(state.time, driver.availableAt);
-  const completeAt = beginsAt + travelMinutes + SERVICE_MINUTES;
+  const { travelMinutes, beginsAt, completeAt, originZone } = previewAssignment(state, job, driver);
   return {
     ...state,
     selectedJobId: null,
     agentAccepted: state.agentAccepted + (source === "agent" ? 1 : 0),
     manualAssignments: state.manualAssignments + (source === "manual" ? 1 : 0),
-    jobs: state.jobs.map((item) => item.id === jobId ? { ...item, status: "assigned", driverId, completeAt, travelMinutes } : item),
+    jobs: state.jobs.map((item) => item.id === jobId ? { ...item, status: "assigned", driverId, completeAt, travelMinutes, beginsAt, originZone } : item),
     drivers: state.drivers.map((item) => item.id === driverId ? { ...item, assigned: item.assigned + 1, availableAt: completeAt } : item),
-    log: [...state.log, { at: state.time, kind: "assignment", text: `${job.reference} assigned to ${driver.name}${source === "agent" ? " using the agent proposal" : " manually"}.` }],
+    log: [...state.log, { at: state.time, kind: "assignment", text: `${job.reference} assigned to ${driver.name}${source === "agent" ? " using the suggested match" : " manually"}. Arrival ${formatTime(completeAt)}.` }],
   };
 }
 
@@ -227,12 +240,22 @@ function triggerEvent(state: GameState, event: GameEvent): GameState {
       ...next,
       forcedReassignments: next.forcedReassignments + affected.length,
       drivers: next.drivers.map((driver) => driver.id === "D2" ? { ...driver, available: false, assigned: 0 } : driver),
-      jobs: next.jobs.map((job) => job.driverId === "D2" && job.status === "assigned" ? { ...job, status: "waiting", driverId: null, completeAt: null, travelMinutes: 0 } : job),
+      jobs: next.jobs.map((job) => job.driverId === "D2" && job.status === "assigned" ? { ...job, status: "waiting", driverId: null, completeAt: null, travelMinutes: 0, beginsAt: null, originZone: null } : job),
     };
   }
   if (event.kind === "closure") {
     const closureDelay = 15; // GUESS: one game turn makes the incident visible without claiming a real traffic delay.
-    next = { ...next, jobs: next.jobs.map((job) => job.zone === "West" && job.status === "assigned" && job.completeAt !== null ? { ...job, completeAt: job.completeAt + closureDelay } : job) };
+    const jobs = next.jobs.map((job) => ({ ...job }));
+    const drivers = next.drivers.map((driver) => {
+      let delay = 0; // SOURCE: no delay until this driver's queued work reaches the restricted zone.
+      for (const job of jobs.filter((item) => item.driverId === driver.id && item.status === "assigned").sort((a, b) => (a.completeAt ?? 0) - (b.completeAt ?? 0))) {
+        if (job.beginsAt !== null && job.beginsAt >= event.at) job.beginsAt += delay;
+        if (job.zone === "West") { delay += closureDelay; job.travelMinutes += closureDelay; }
+        if (job.completeAt !== null) job.completeAt += delay;
+      }
+      return { ...driver, availableAt: driver.availableAt + delay };
+    });
+    next = { ...next, jobs, drivers };
   }
   return next;
 }
@@ -240,11 +263,15 @@ function triggerEvent(state: GameState, event: GameEvent): GameState {
 export function advanceTime(state: GameState): GameState {
   if (state.phase !== "playing") return state;
   const nextTime = Math.min(SHIFT_END, state.time + TICK_MINUTES);
-  let next = deliverCompleted(state, nextTime);
+  let next = state;
   const dueEvents = next.events.filter((event) => event.at > state.time && event.at <= nextTime && !next.triggeredEventIds.includes(event.id));
-  for (const event of dueEvents) next = triggerEvent(next, event);
+  for (const event of dueEvents.sort((a, b) => a.at - b.at)) {
+    next = deliverCompleted(next, event.at);
+    next = triggerEvent(next, event);
+  }
+  next = deliverCompleted(next, nextTime);
   next = { ...next, time: nextTime };
-  if (nextTime >= SHIFT_END || next.jobs.every((job) => job.status === "delivered")) return { ...next, phase: "complete" };
+  if (nextTime >= SHIFT_END || (next.triggeredEventIds.length === next.events.length && next.jobs.every((job) => job.status === "delivered"))) return { ...next, phase: "complete" };
   return next;
 }
 

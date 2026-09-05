@@ -12,6 +12,7 @@ import {
   gameResult,
   minutesToDue,
   proposeAssignment,
+  previewAssignment,
   startGame,
 } from "./game";
 
@@ -101,5 +102,48 @@ describe("DispatchOps game engine", () => {
     expect(result.total).toBe(5);
     expect(result.score).toBe(0);
     expect(result.rating).toBe("At risk");
+  });
+
+  it("SYNTHETIC: queued routes start at the previous destination", () => {
+    let state = startGame(createInitialGame());
+    state = assignJob(state, "J2", "D3", "manual");
+    const plan = previewAssignment(state, state.jobs.find((j) => j.id === "J4")!, state.drivers.find((d) => d.id === "D3")!);
+    expect(plan.originZone).toBe("West");
+    expect(plan.beginsAt).toBe(state.jobs.find((j) => j.id === "J2")!.completeAt);
+    state = assignJob(state, "J4", "D3", "manual");
+    expect(state.jobs.find((j) => j.id === "J4")!.completeAt).toBe(plan.completeAt);
+  });
+
+  it("SYNTHETIC: recommendations account for a driver's queued work", () => {
+    let state = startGame(createInitialGame());
+    state = assignJob(state, "J1", "D4", "manual");
+    state = advanceTime(advanceTime(state));
+    state = assignJob(state, "J3", "D4", "manual");
+    expect(proposeAssignment(state, "J6")?.driverId).toBe("D2");
+  });
+
+  it("SYNTHETIC: a complete recommended playthrough includes every incident", () => {
+    let state = startGame(createInitialGame());
+    while (state.phase === "playing") {
+      for (const job of [...state.jobs].sort((a, b) => a.dueAt - b.dueAt)) {
+        const proposal = proposeAssignment(state, job.id);
+        if (proposal) state = assignJob(state, job.id, proposal.driverId, "agent");
+      }
+      state = advanceTime(state);
+    }
+    expect(state.triggeredEventIds).toHaveLength(3);
+    expect(gameResult(state).delivered).toBe(6);
+    expect(state.invalidAttempts).toBe(0);
+  });
+
+  it("SYNTHETIC: the West restriction delays queued work and future assignments", () => {
+    let state = startGame(createInitialGame());
+    for (let turn = 0; turn < 4; turn++) state = advanceTime(state);
+    state = assignJob(state, "J2", "D3", "manual");
+    state = assignJob(state, "J4", "D3", "manual");
+    const before = state.jobs.find((j) => j.id === "J4")!.completeAt!;
+    state = advanceTime(state);
+    expect(state.jobs.find((j) => j.id === "J4")!.completeAt).toBe(before + TICK_MINUTES);
+    expect(state.drivers.find((d) => d.id === "D3")!.availableAt).toBe(before + TICK_MINUTES);
   });
 });
